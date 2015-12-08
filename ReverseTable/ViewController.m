@@ -14,8 +14,13 @@ static NSUInteger ValuesPerPage = 50;
 
 @property (nonatomic) NSMutableArray *data;
 @property (nonatomic) UITableView *tableView;
-@property (nonatomic) UIRefreshControl *refreshControl;
+@property (nonatomic) UIView *headerView;
+@property (nonatomic) UIActivityIndicatorView *spinner;
+@property (nonatomic) UILabel *upToDateLabel;
+
 @property (nonatomic) BOOL needsRefresh;
+@property (nonatomic) BOOL isRedrawing;
+@property (nonatomic) BOOL isUpToDate;
 
 - (void)beginToDrawMore;
 - (void)loadPreviousPageData;
@@ -28,16 +33,30 @@ static NSUInteger ValuesPerPage = 50;
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
+    self.headerView = [UIView new];
+    self.headerView.frame = (CGRect){CGPointZero, [UIScreen mainScreen].bounds.size.width, 50};
+    
+    self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray];
+    self.spinner.center = self.headerView.center;
+    self.spinner.tintColor = [UIColor redColor];
+    [self.spinner hidesWhenStopped];
+    [self.headerView addSubview:self.spinner];
+    
+    self.upToDateLabel = [UILabel new];
+    self.upToDateLabel.text = @"You're up to date!";
+    self.upToDateLabel.textAlignment = NSTextAlignmentCenter;
+    self.upToDateLabel.alpha = 0; // hidden by default.
+    self.upToDateLabel.font = [UIFont fontWithName:@"HelveticaNeue-Light" size:10];
+    self.upToDateLabel.frame = (CGRect){0, (self.headerView.frame.size.height - 16) / 2.0, self.headerView.frame.size.width, 16};
+    [self.headerView addSubview:self.upToDateLabel];
     
     self.tableView = [UITableView new];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
+    self.tableView.rowHeight = 50;
+    self.tableView.allowsSelection = NO;
     self.tableView.frame = (CGRect){0, 20, [UIScreen mainScreen].bounds.size.width, [UIScreen mainScreen].bounds.size.height - 20};
-
-    self.refreshControl = [[UIRefreshControl alloc] init];
-    self.refreshControl.tintColor = [UIColor colorWithWhite:0.3 alpha:.7];
-    [self.refreshControl addTarget:self action:@selector(beginToDrawMore) forControlEvents:UIControlEventValueChanged];
-    [self.tableView addSubview:self.refreshControl];
 
     [self.view addSubview:self.tableView];
     
@@ -61,23 +80,31 @@ static NSUInteger ValuesPerPage = 50;
         [self.data addObject:@(i + 1)];
     }
 
+    self.needsRefresh = NO;
+    self.isUpToDate = NO;
+    self.isRedrawing = NO;
+    
     [self.tableView reloadData];
     
     // scroll to the bottom.
-    [self.tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:self.data.count - 1 inSection:0] atScrollPosition:UITableViewScrollPositionBottom animated:NO];
+    [self.tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:self.data.count inSection:0] atScrollPosition:UITableViewScrollPositionBottom animated:NO];
 }
 
 - (void)beginToDrawMore {
-    self.needsRefresh = YES;
     
+    if (self.isRedrawing) {
+        return;
+    }
+    
+    self.needsRefresh = YES;
+
+    // don't draw while dragging.
     if (self.tableView.isDragging) {
         return;
     }
-    CGRect firstRow = [self.tableView rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
-    CGFloat yOffset = firstRow.origin.y - self.refreshControl.frame.size.height;
     
-    [self.tableView setContentOffset:CGPointMake(0, yOffset) animated:YES];
-    [self.refreshControl beginRefreshing];
+    self.isRedrawing = YES;
+    [self.spinner startAnimating];
     
     // Prepare data.
     [self loadPreviousPageData];
@@ -88,11 +115,10 @@ static NSUInteger ValuesPerPage = 50;
 }
 
 - (void)loadPreviousPageData {
-    if (self.data.count == StartingValue) {
-        // stop refreshing.
-        [self.tableView setContentOffset:CGPointZero animated:YES];
-        [self.refreshControl endRefreshing];
-        
+    if (self.data.count == StartingValue && !self.isUpToDate) {
+        self.needsRefresh = NO;
+        [self.spinner stopAnimating];
+
         return;
     }
     NSMutableArray *newValues = @[].mutableCopy;
@@ -101,32 +127,47 @@ static NSUInteger ValuesPerPage = 50;
     }
     
     self.data = [[newValues arrayByAddingObjectsFromArray:self.data] mutableCopy];
+    
+    // determine if you're up to date BEFORE drawing anything new.
+    self.isUpToDate = self.data.count == StartingValue;
 }
 
 - (void)drawPreviousPage {
-    
     CGFloat currentHeight = self.tableView.contentSize.height;
     [self.tableView reloadData];
+    [self.tableView setContentOffset:(CGPoint){0, self.tableView.contentSize.height - currentHeight} animated:NO];
+    [self.spinner stopAnimating];
     
-    [self.tableView setContentOffset:(CGPoint){0, self.tableView.contentSize.height - currentHeight - self.refreshControl.frame.size.height} animated:NO];
-    
-    [self.refreshControl endRefreshing];
-
     self.needsRefresh = NO;
+    self.isRedrawing = NO;
 }
 
 #pragma mark - UITableViewDatasource
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return self.data.count;
+    if (!self.data) {
+        return 0;
+    }
+    
+    return self.data.count + (self.isUpToDate ? 0 : 1);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.row == 0 && !self.isUpToDate) {
+        // header cell.
+        UITableViewCell *header = [tableView dequeueReusableCellWithIdentifier:@"Header"];
+        if (!header) {
+            header = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Header"];
+            [header addSubview:self.headerView];
+        }
+        return header;
+    }
+    
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell"];
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell"];
     }
     
-    cell.textLabel.text = [NSString stringWithFormat:@"Row: %d", [self.data[indexPath.row] intValue]];
+    cell.textLabel.text = [NSString stringWithFormat:@"Row: %d", [self.data[indexPath.row - (self.isUpToDate ? 0 : 1)] intValue]];
     cell.textLabel.font = [UIFont fontWithName:@"HelveticaNeue-Light" size:14];
     cell.textLabel.textAlignment = NSTextAlignmentCenter;
     
@@ -134,10 +175,28 @@ static NSUInteger ValuesPerPage = 50;
 }
 
 
-#pragma mark - UIScrollViewDelegate
-- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
-    if (scrollView.contentOffset.y <= 0 && self.needsRefresh) {
+#pragma mark - UITableViewDelegate
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.row == 0 && !self.isUpToDate) {
+        [self.spinner startAnimating];
         [self beginToDrawMore];
     }
 }
+
+#pragma mark - UIScrollViewDelegate
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+    if (self.needsRefresh) {
+        if (scrollView.contentOffset.y <= 0) {
+            [self beginToDrawMore];
+        }
+    }
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView.contentOffset.y <= self.headerView.frame.size.height / 2.0 && self.needsRefresh && !self.isRedrawing && !self.isUpToDate && !scrollView.isDragging) {
+        [self beginToDrawMore];
+    }
+}
+
 @end
